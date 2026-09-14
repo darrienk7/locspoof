@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 import asyncio
 import ctypes
 import os
@@ -18,6 +17,13 @@ TUNNEL_TIMEOUT = 60.0
 RSD_LINE = re.compile(r"^(\S+)\s+(\d+)\s*$")
 
 DEBUG = "--debug" in sys.argv
+FORCE_SUDO_TUNNEL = "--sudo-tunnel" in sys.argv
+
+IS_MAC = sys.platform == "darwin"
+IS_WINDOWS = os.name == "nt"
+
+# macOS rides Apple's existing tunnel (no root). Everywhere else we build one.
+USE_NATIVE_TUNNEL = IS_MAC and not FORCE_SUDO_TUNNEL
 
 
 def log(msg: str) -> None:
@@ -25,9 +31,16 @@ def log(msg: str) -> None:
         print(f"[debug] {msg}", file=sys.stderr)
 
 
+def tunnel_argv() -> list[str]:
+    base = [sys.executable, "-m", "pymobiledevice3"]
+    if USE_NATIVE_TUNNEL:
+        return base + ["remote", "start-tunnel", "--script-mode"]
+    return base + ["lockdown", "start-tunnel", "--script-mode"]
+
+
 def is_admin() -> bool:
-    """True if we have the privileges start-tunnel needs."""
-    if os.name == "nt":
+    """True if we have the privileges the classic tunnel needs."""
+    if IS_WINDOWS:
         try:
             return bool(ctypes.windll.shell32.IsUserAnAdmin())
         except Exception:
@@ -38,14 +51,11 @@ def is_admin() -> bool:
 async def open_tunnel() -> tuple[asyncio.subprocess.Process, str, int]:
     """
     Spawn `lockdown start-tunnel --script-mode` and read the RSD address/port
-    it prints. MUST KEEP IT ALIVE OR THE TUNNEL WILL CLOSE EVEN AFTER
-    EXTRACTING THE ADDRESS AND PORT NUM
+    it prints. The tunnel lives only as long as this process, so the caller
+    must keep the returned Process alive.
     """
     env = dict(os.environ, PYTHONUNBUFFERED="1")
-    argv = [
-        sys.executable, "-m", "pymobiledevice3",
-        "lockdown", "start-tunnel", "--script-mode",
-    ]
+    argv = tunnel_argv()
     log(f"spawning: {' '.join(argv)}")
 
     proc = await asyncio.create_subprocess_exec(
@@ -88,7 +98,7 @@ async def open_tunnel() -> tuple[asyncio.subprocess.Process, str, int]:
 
 
 def parse_coords(text: str) -> tuple[float, float] | None:
-    """Accept the coords. Returns None if unparseable."""
+    """Accept '40.69, -74.04' or '40.69 -74.04'. Returns None if unparseable."""
     parts = [p for p in re.split(r"[,\s]+", text.strip()) if p]
     if len(parts) != 2:
         return None
@@ -97,15 +107,15 @@ def parse_coords(text: str) -> tuple[float, float] | None:
     except ValueError:
         return None
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-        print("! Coordinates out of range. Must be in LAT: [-90, 90], LON: [-180,180]")
+        print("! out of range LAT: [-90, 90] LON: [-180, 180]")
         return None
     return lat, lon
 
 
 async def prompt_loop(loc: LocationSimulation) -> None:
     print()
-    print("  Enter coordinates as 'lat, lon'   e.g.  40.690008, -74.045843")
-    print("  'clear' restores real GPS  |  'q' OR 'exit' OR 'quit' quits")
+    print("  Enter coordinates as 'lat lon'   e.g.  40.690008, -74.045843 OR 40.690008 -74.045843")
+    print("  'clear' restores real GPS  |  'q' OR 'quit' OR 'exit' quits")
     print()
 
     while True:
@@ -128,35 +138,38 @@ async def prompt_loop(loc: LocationSimulation) -> None:
 
         coords = parse_coords(line)
         if coords is None:
-            print("! Not correct format. try:  40.690008, -74.045843 OR 40.690008 -74.045843\n")
+            print("? Not understand - try:  40.690008, -74.045843")
             continue
 
         lat, lon = coords
         try:
             await loc.set(lat, lon)
         except Exception as exc:
-            print(f"  ! failed to set location: {exc}")
+            print(f"! failed to set location: {exc}")
             continue
-        print(f"+ Successfully changed location to {lat:.6f}, {lon:.6f}\n")
+        print(f"* successful spoof to {lat:.6f}, {lon:.6f}")
 
 
 async def main() -> int:
-    if not is_admin():
-        print("This needs an elevated shell - 'lockdown start-tunnel' creates a")
-        print("network interface and is marked @sudo_required.")
+    if not USE_NATIVE_TUNNEL and not is_admin():
+        print("The classic tunnel creates a network interface, so it needs elevation.")
         print()
-        if os.name == "nt":
+        if IS_WINDOWS:
             print("Run run.bat, or reopen your terminal as Administrator.")
         else:
-            print("Re-run with sudo.")
+            print("Re-run with sudo, e.g.:  sudo .venv/bin/python spoof.py")
         return 1
 
-    print("Opening tunnel (this takes a few seconds)...")
+    kind = "native (no root)" if USE_NATIVE_TUNNEL else "classic"
+    print(f"Opening {kind} tunnel (this takes a few seconds)...")
     try:
         tunnel, address, port = await open_tunnel()
     except Exception as exc:
         print(f"Could not open the tunnel: {exc}")
         print("Is the iPhone plugged in, unlocked, trusted, and in Developer Mode?")
+        if USE_NATIVE_TUNNEL:
+            print("If the native tunnel keeps failing, try:")
+            print("  sudo .venv/bin/python spoof.py --sudo-tunnel")
         return 1
 
     print(f"Tunnel up  ->  RSD {address} port {port}")
