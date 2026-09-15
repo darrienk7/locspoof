@@ -21,6 +21,34 @@ from core.tunnel_manager import (
     is_admin,
 )
 
+USAGE = """locspoof - set your iPhone's GPS location from the terminal
+
+usage: main.py [options]
+
+options:
+  -h, --help            show this message and exit
+  --debug               echo tunnel output and internal trace to stderr
+  --noise M             drift radius in meters (default %(radius)g)
+  --noise-interval S    seconds between drift samples (default %(interval)g)
+  --no-noise            disable drift entirely - a perfectly static point
+  --sudo-tunnel         macOS only: force the classic root tunnel
+
+at the prompt:
+  40.69, -74.04             set location
+  40.69, -74.04 as home     set location and bookmark it
+  home                      go to a saved bookmark
+  save home                 bookmark where you are now
+  list                      show, and delete, saved bookmarks
+  noise [on|off|<meters>]   drift status or control
+  clear                     restore real GPS
+  q                         quit
+""" % {"radius": DEFAULT_RADIUS_M, "interval": DEFAULT_INTERVAL_S}
+
+# Flags taking no value, and flags consuming the argument after them.
+BOOL_FLAGS = frozenset({"--debug", "--sudo-tunnel", "--no-noise", "--help", "-h"})
+VALUE_FLAGS = frozenset({"--noise", "--noise-interval"})
+
+HELP = "--help" in sys.argv or "-h" in sys.argv
 DEBUG = "--debug" in sys.argv
 FORCE_SUDO_TUNNEL = "--sudo-tunnel" in sys.argv
 NO_NOISE = "--no-noise" in sys.argv
@@ -32,6 +60,26 @@ USE_NATIVE_TUNNEL = IS_MAC and not FORCE_SUDO_TUNNEL
 def log(msg: str) -> None:
     if DEBUG:
         print(f"[debug] {msg}", file=sys.stderr)
+
+
+def unknown_flags(argv: list[str]) -> list[str]:
+    """Anything that isn't a known flag or the value of one.
+
+    A silently-ignored typo like `--nosie 5` would run with the default radius
+    and never say so, which is worse than refusing to start.
+    """
+    unknown: list[str] = []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg in BOOL_FLAGS:
+            index += 1
+        elif arg in VALUE_FLAGS:
+            index += 2
+        else:
+            unknown.append(arg)
+            index += 1
+    return unknown
 
 
 def flag_value(name: str, default: float) -> float:
@@ -64,6 +112,17 @@ def report_tunnel_failure(exc: Exception) -> None:
 
 
 async def main() -> int:
+    # Help and flag validation come first: neither should touch the phone.
+    if HELP:
+        print(USAGE, end="")
+        return 0
+
+    bad = unknown_flags(sys.argv[1:])
+    if bad:
+        print(f"! unknown option{'s' if len(bad) > 1 else ''}: {' '.join(bad)}")
+        print("  run with --help to see the available options")
+        return 2
+
     if not USE_NATIVE_TUNNEL and not is_admin():
         print("The classic tunnel creates a network interface, so it needs elevation.")
         print()
@@ -73,10 +132,14 @@ async def main() -> int:
             print("Re-run with sudo, e.g.:  sudo .venv/bin/python main.py")
         return 1
 
-    noise = GpsNoise(
-        radius_m=flag_value("--noise", DEFAULT_RADIUS_M),
-        interval_s=flag_value("--noise-interval", DEFAULT_INTERVAL_S),
-    )
+    try:
+        noise = GpsNoise(
+            radius_m=flag_value("--noise", DEFAULT_RADIUS_M),
+            interval_s=flag_value("--noise-interval", DEFAULT_INTERVAL_S),
+        )
+    except ValueError as exc:
+        print(f"! {exc}")
+        return 2
 
     tunnel = TunnelManager(use_native=USE_NATIVE_TUNNEL, timeout=DEFAULT_TIMEOUT, debug=log)
     devices = DeviceManager(tunnel, debug=log)

@@ -13,26 +13,70 @@ from core.models import Coordinate
 
 BANNER = (
     "  Enter coordinates as 'lat lon'   e.g.  40.690008, -74.045843 OR 40.690008 -74.045843\n"
+    "  Add 'as <name>' to bookmark them  |  'save <name>' bookmarks where you are now\n"
     "  Or enter an exact saved name  |  'list' shows saved locations\n"
     "  'clear' restores real GPS  |  'noise' shows drift status  |  'q' quits"
 )
 
 QUIT_WORDS = ("q", "quit", "exit")
 
+# Commands are matched before saved names, so a bookmark with one of these
+# names would be unreachable. `reserved_name` refuses them at save time.
+COMMAND_WORDS = (*QUIT_WORDS, "clear", "noise", "list", "save", "delete", "back")
+PREFIX_COMMANDS = ("noise", "save", "delete")
 
-def parse_coords(text: str) -> Coordinate | None:
-    """Accept '40.69, -74.04' or '40.69 -74.04'. Returns None if unparseable."""
+# `40.69, -74.04 as home` - the separator between a coordinate and its bookmark.
+AS_SEPARATOR = re.compile(r"\s+as\s+", re.IGNORECASE)
+
+
+def parse_coordinate(text: str) -> tuple[Coordinate | None, str | None]:
+    """Parse 'lat lon' or 'lat, lon'.
+
+    Returns (coordinate, error). Both None means the text is not
+    coordinate-shaped at all, so it may still be a saved name. A non-None
+    error means it clearly *was* meant as coordinates but is unusable.
+    """
     parts = [p for p in re.split(r"[,\s]+", text.strip()) if p]
     if len(parts) != 2:
-        return None
+        return None, None
     try:
         lat, lon = float(parts[0]), float(parts[1])
     except ValueError:
-        return None
-    try:
-        return Coordinate(lat, lon)
-    except ValueError:
-        return None
+        return None, None
+
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return None, "! coordinates must be finite numbers"
+    if not -90 <= lat <= 90:
+        return None, "! Latitude out of range. Must be in [-90, 90]"
+    if not -180 <= lon <= 180:
+        return None, "! Longitude out of range. Must be in [-180, 180]"
+    return Coordinate(lat, lon), None
+
+
+def parse_coords(text: str) -> Coordinate | None:
+    """Convenience wrapper for callers that only want the coordinate."""
+    return parse_coordinate(text)[0]
+
+
+def split_as(line: str) -> tuple[str, str | None]:
+    """Split '<target> as <name>'. Name is None when there is no separator."""
+    parts = AS_SEPARATOR.split(line, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return line, None
+
+
+def reserved_name(name: str) -> bool:
+    """Names that could never be typed back, because something else wins."""
+    lowered = name.lower()
+    if lowered in COMMAND_WORDS:
+        return True
+    if any(lowered.startswith(word + " ") for word in PREFIX_COMMANDS):
+        return True
+    if AS_SEPARATOR.search(name):
+        return True
+    coord, error = parse_coordinate(name)
+    return coord is not None or error is not None
 
 
 def describe_noise(location: LocationService) -> str:
@@ -87,6 +131,39 @@ async def handle_noise_command(location: LocationService, args: str) -> None:
     print(f"  noise radius set to +/-{radius:g}m")
 
 
+def save_bookmark(saved: LocationStore, name: str, coord: Coordinate) -> bool:
+    """Validate and store one bookmark, reporting the outcome."""
+    if not name:
+        print("! a bookmark needs a name")
+        return False
+    if reserved_name(name):
+        print(f"! {name!r} is a command or coordinate - pick another name")
+        return False
+    try:
+        saved.save(name, coord)
+    except LocationExistsError:
+        print(f"! {name!r} is already saved - delete it first or pick another name")
+        return False
+    except sqlite3.Error as exc:
+        print(f"! could not save: {exc}")
+        return False
+    print(f"  + saved {name}")
+    return True
+
+
+def handle_save_command(location: LocationService, saved: LocationStore, args: str) -> None:
+    """`save <name>` bookmarks the current anchor - the exact coordinate typed."""
+    name = args.strip()
+    if not name:
+        print("? usage: save <name>   (bookmarks where you are now)")
+        return
+    anchor = location.anchor
+    if anchor is None:
+        print("! nothing to save - set a location first")
+        return
+    save_bookmark(saved, name, anchor)
+
+
 async def read_line(label: str) -> str | None:
     try:
         return (await asyncio.to_thread(input, label)).strip()
@@ -109,46 +186,22 @@ async def show_saved_locations(saved: LocationStore) -> bool:
         line = await read_line("  saved> ")
         if line is None or line.lower() in QUIT_WORDS:
             return False
-        if line.lower() == "back":
+        lowered = line.lower()
+        if lowered == "back":
             return True
-        if line.lower() == "list":
+        if lowered == "list":
             continue
-        if line.lower().startswith("delete "):
+        if lowered == "delete":
+            print("? usage: delete <exact name>")
+            continue
+        if lowered.startswith("delete "):
             name = line[len("delete "):].strip()
             if saved.delete(name):
                 print(f"  - deleted {name}")
             else:
-                print("? not understand")
-        else:
-            print("? not understand")
-
-
-def reserved_name(name: str) -> bool:
-    """Command words/coordinate literals would be unreachable as saved names."""
-    lowered = name.lower()
-    return (lowered in (*QUIT_WORDS, "clear", "noise", "list", "discard")
-            or lowered.startswith("noise ") or parse_coords(name) is not None)
-
-
-async def choose_save_name(saved: LocationStore) -> tuple[bool, str | None]:
-    """(proceed, name): None names are deliberate unsaved moves."""
-    while True:
-        name = await read_line("  Save a name, or type 'discard' to go without saving ('list' to view): ")
-        if name is None or name.lower() in QUIT_WORDS:
-            return False, None
-        if name.lower() == "discard":
-            return True, None
-        if name.lower() == "list":
-            if not await show_saved_locations(saved):
-                return False, None
+                print(f"? no saved location named {name!r}")
             continue
-        if not name or reserved_name(name):
-            print("! choose a nonempty name that is not a command or coordinate")
-            continue
-        if saved.get(name) is not None:
-            print("! name already saved")
-            continue
-        return True, name
+        print("? not understand")
 
 
 async def run(location: LocationService, saved: LocationStore) -> None:
@@ -183,33 +236,30 @@ async def run(location: LocationService, saved: LocationStore) -> None:
             await handle_noise_command(location, line[len("noise"):])
             continue
 
-        coord = parse_coords(line)
-        name_to_save = None
+        if lowered == "save" or lowered.startswith("save "):
+            handle_save_command(location, saved, line[len("save"):])
+            continue
+
+        target, inline_name = split_as(line)
+        coord, error = parse_coordinate(target)
+
+        if error is not None:
+            print(error)
+            continue
+
         if coord is None:
-            # Check if it was a range error vs format error
-            parts = [p for p in re.split(r"[,\s]+", line.strip()) if p]
-            if len(parts) == 2:
-                try:
-                    lat, lon = float(parts[0]), float(parts[1])
-                    # Format was OK, so check ranges
-                    if not -90 <= lat <= 90:
-                        print("! Latitude out of range. Must be in [-90, 90]")
-                        continue
-                    if not -180 <= lon <= 180:
-                        print("! Longitude out of range. Must be in [-180, 180]")
-                        continue
-                except ValueError:
-                    pass
-            # Format error or unknown saved location name
+            # Not coordinate-shaped, so look the whole line up as a bookmark.
+            if inline_name is not None:
+                print("! 'as <name>' only works with coordinates")
+                continue
             entry = saved.get(line)
             if entry is None:
-                print("? not understand. Try 'list' to see saved locations, or enter coordinates as 'lat lon'.")
+                print(
+                    "? not understand. Try 'list' to see saved locations, "
+                    "or enter coordinates as 'lat lon'."
+                )
                 continue
             coord = entry.coordinate
-        else:
-            proceed, name_to_save = await choose_save_name(saved)
-            if not proceed:
-                return
 
         try:
             await location.set_location(coord)
@@ -217,13 +267,9 @@ async def run(location: LocationService, saved: LocationStore) -> None:
             print(f"! failed to set location: {exc}")
             continue
 
-        # Save the exact requested anchor only after the device write succeeds.
-        if name_to_save is not None:
-            try:
-                saved.save(name_to_save, coord)
-                print(f"  + saved {name_to_save}")
-            except (sqlite3.Error, LocationExistsError) as exc:
-                print(f"! location changed but could not save: {exc}")
+        # Bookmark the exact requested anchor, only after the write succeeds.
+        if inline_name is not None:
+            save_bookmark(saved, inline_name, coord)
 
         msg = f"* successful spoof to {coord.latitude:.6f}, {coord.longitude:.6f}"
         if location.noise_enabled:
