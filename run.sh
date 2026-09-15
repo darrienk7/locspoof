@@ -2,7 +2,7 @@
 # locspoof launcher (macOS / Linux)
 #
 # On macOS no sudo is needed: pymobiledevice3 uses Apple's native tunnel.
-# On Linux the classic tunnel needs root, so spoof.py will ask you to re-run
+# On Linux the classic tunnel needs root, so main.py will ask you to re-run
 # under sudo.
 
 set -euo pipefail
@@ -17,4 +17,4 @@ if [ ! -x "$PY" ]; then
     exit 1
 fi
 
-exec "$PY" spoof.py "$@"
+exec "$PY" main.py "$@"
