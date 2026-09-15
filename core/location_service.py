@@ -16,12 +16,13 @@ be a random walk, and the device would drift away over time.
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import AsyncExitStack
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
-
-from .device_manager import DeviceManager
+if TYPE_CHECKING:
+    from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
+    from .device_manager import DeviceManager
 from .models import Coordinate
 from .noise import GpsNoise
 
@@ -88,6 +89,8 @@ class LocationService:
 
     async def attach(self) -> None:
         """Open the LocationSimulation channel on the live DVT connection."""
+        from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
+
         if self._sim is not None:
             return
         stack = AsyncExitStack()
@@ -105,6 +108,8 @@ class LocationService:
         self._sim = None
         self._anchor = None
         self._current = None
+        self.noise.reset()
+        self._tick_count = 0
         if stack is not None:
             await stack.aclose()
 
@@ -114,18 +119,27 @@ class LocationService:
 
     async def set_location(self, coord: Coordinate) -> None:
         """Move to `coord`, then start drifting around it if noise is on."""
+        # Finish any in-flight noise write before changing the anchor or state.
+        await self._stop_noise()
+        try:
+            await self._write(coord)
+        except Exception:
+            if self._noise_enabled and self._anchor is not None:
+                self._start_noise()
+            raise
         self._anchor = coord
-        await self._write(coord)
+        self.noise.reset()
         self._tick_count = 0
         if self._noise_enabled:
             self._start_noise()
 
     async def clear_location(self) -> None:
         await self._stop_noise()
-        self._anchor = None
         await self._require().clear()
+        self._anchor = None
         self._current = None
         self._tick_count = 0
+        self.noise.reset()
 
     async def set_noise_enabled(self, enabled: bool) -> None:
         """Turn drift on or off mid-session.
@@ -141,6 +155,8 @@ class LocationService:
             await self._stop_noise()
             if self._anchor is not None:
                 await self._write(self._anchor)
+            self.noise.reset()
+            self._tick_count = 0
 
     # ------------------------------------------------------------------
     # Routes - not implemented yet, see the phase-1 plan
@@ -192,13 +208,19 @@ class LocationService:
         Stops on the first write failure rather than spinning on a dead
         connection; the CLI surfaces that through `noise` status.
         """
+        # perf_counter is monotonic with sufficient resolution for short Windows
+        # intervals; some Python event-loop clocks advance only every ~15 ms.
+        previous_tick = time.perf_counter()
         while True:
             await asyncio.sleep(self.noise.interval_s)
             anchor = self._anchor
             if anchor is None:
                 return
             try:
-                await self._write(self.noise.jitter(anchor))
+                now = time.perf_counter()
+                dt = now - previous_tick
+                previous_tick = now
+                await self._write(self.noise.jitter(anchor, dt_s=dt))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

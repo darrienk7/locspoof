@@ -9,6 +9,7 @@ import sys
 from cli import prompt
 from core.device_manager import DeviceManager
 from core.location_service import LocationService
+from core.location_store import LocationStore
 from core.noise import DEFAULT_INTERVAL_S, DEFAULT_RADIUS_M, GpsNoise
 from core.tunnel_manager import (
     DEFAULT_TIMEOUT,
@@ -103,7 +104,8 @@ async def main() -> int:
 
         await location.attach()
         try:
-            await prompt.run(location)
+            with LocationStore() as saved_locations:
+                await prompt.run(location, saved_locations)
         finally:
             print("Restoring real GPS...")
             try:

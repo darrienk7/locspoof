@@ -46,3 +46,6 @@ secrets.json
 .idea/
 .DS_Store
 Thumbs.db
+
+# Saved coordinate database (local user data)
+/data/locations.sqlite3*

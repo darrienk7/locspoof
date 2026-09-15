@@ -26,6 +26,14 @@ class Coordinate:
 
 
 @dataclass(frozen=True)
+class SavedLocation:
+    """A case-sensitive bookmark for an exact requested coordinate (no noise)."""
+
+    name: str
+    coordinate: Coordinate
+
+
+@dataclass(frozen=True)
 class TunnelInfo:
     """Where the RSD endpoint lives, once a tunnel is up."""
 
