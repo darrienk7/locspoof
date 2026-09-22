@@ -51,6 +51,41 @@ class LocationService:
         self._noise_enabled = noise_enabled
         self._noise_task: Optional[asyncio.Task] = None
         self._tick_count = 0
+        self._listeners: list[Callable[[], None]] = []
+
+    # ------------------------------------------------------------------
+    # Observation
+    # ------------------------------------------------------------------
+
+    def add_listener(self, callback: Callable[[], None]) -> None:
+        """Be told whenever the reported location or noise state changes.
+
+        Fires on every device write - typed coordinates and each noise tick -
+        plus clears and noise toggles. A UI subscribes instead of polling.
+
+        Callbacks are synchronous and run on the event loop, inside the noise
+        ticker. Do not block in one: schedule the work. Exceptions are logged
+        and swallowed so a broken observer cannot stop the drift.
+        """
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[], None]) -> None:
+        if callback in self._listeners:
+            self._listeners.remove(callback)
+
+    def _notify(self) -> None:
+        """Called once state is consistent - never mid-update.
+
+        `_write` deliberately does not notify: during `set_location` it runs
+        before the anchor is committed, so observers would briefly see a new
+        `current` against the old `anchor`.
+        """
+        for callback in list(self._listeners):
+            try:
+                callback()
+            except Exception as exc:
+                self._debug(f"listener failed: {exc}")
 
     # ------------------------------------------------------------------
     # State
@@ -65,10 +100,6 @@ class LocationService:
     def current(self) -> Optional[Coordinate]:
         """The coordinate last actually written to the device."""
         return self._current
-
-    @property
-    def is_attached(self) -> bool:
-        return self._sim is not None
 
     @property
     def noise_enabled(self) -> bool:
@@ -102,6 +133,13 @@ class LocationService:
         self._stack = stack
         self._sim = sim
 
+    def attach_simulated(self) -> None:
+        """DEBUG MODE: send writes to an in-process stand-in instead of a phone."""
+        from .simulated import SimulatedLocation
+
+        if self._sim is None:
+            self._sim = SimulatedLocation(debug=self._debug)
+
     async def detach(self) -> None:
         await self._stop_noise()
         stack, self._stack = self._stack, None
@@ -132,6 +170,7 @@ class LocationService:
         self._tick_count = 0
         if self._noise_enabled:
             self._start_noise()
+        self._notify()
 
     async def clear_location(self) -> None:
         await self._stop_noise()
@@ -140,6 +179,7 @@ class LocationService:
         self._current = None
         self._tick_count = 0
         self.noise.reset()
+        self._notify()
 
     async def set_noise_enabled(self, enabled: bool) -> None:
         """Turn drift on or off mid-session.
@@ -157,16 +197,7 @@ class LocationService:
                 await self._write(self._anchor)
             self.noise.reset()
             self._tick_count = 0
-
-    # ------------------------------------------------------------------
-    # Routes - not implemented yet, see the phase-1 plan
-    # ------------------------------------------------------------------
-
-    async def play_route(self, route) -> None:
-        raise NotImplementedError("route playback is not implemented yet")
-
-    async def stop_route(self) -> None:
-        raise NotImplementedError("route playback is not implemented yet")
+        self._notify()
 
     # ------------------------------------------------------------------
     # Internals
@@ -206,7 +237,7 @@ class LocationService:
         """Rewrite the location every interval, offset from the anchor.
 
         Stops on the first write failure rather than spinning on a dead
-        connection; the CLI surfaces that through `noise` status.
+        connection; the web app shows drift as stopped.
         """
         # perf_counter is monotonic with sufficient resolution for short Windows
         # intervals; some Python event-loop clocks advance only every ~15 ms.
@@ -225,5 +256,7 @@ class LocationService:
                 raise
             except Exception as exc:
                 self._debug(f"noise write failed, stopping drift: {exc}")
+                self._notify()
                 return
             self._tick_count += 1
+            self._notify()

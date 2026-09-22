@@ -1,125 +1,141 @@
 # locspoof
 
-Terminal location spoofer for iOS 17+, wrapping [pymobiledevice3](https://github.com/doronz88/pymobiledevice3).
+Set your iPhone's GPS location from your computer. Click a spot on the map, or type
+coordinates, and every app on the phone sees you there.
 
-Opens the tunnel once, holds the DVT LocationSimulation channel open, and lets
-you type coordinates repeatedly — instead of re-running two commands per point.
+Works on macOS and Windows, with iPhones on iOS 17 or newer.
 
-## Requirements
+---
 
-- iPhone in **Developer Mode**, plugged in, unlocked, and trusted
-- A `.venv` in this folder with `pymobiledevice3` installed
+## What you need
 
-## Run
+- **An iPhone on iOS 17 or newer**, and a USB cable to connect it.
+- **An internet connection the first time you connect a phone.** locspoof downloads
+  a one-time component from Apple's developer tools and saves it for next time.
+- **Python 3.10 or newer** on your computer — [python.org/downloads](https://www.python.org/downloads/).
+  On Windows, tick **"Add python.exe to PATH"** during install.
+- **Windows only:** Apple's device drivers. The easiest way to get them is to install
+  **iTunes** or **Apple Devices** from the Microsoft Store.
 
-**macOS** — no sudo. pymobiledevice3 piggybacks Apple's native tunnel via
-`remotepairingd`, which needs no privileges.
+### One-time iPhone setup
 
-```
-./run.sh
-```
+1. **Trust your computer.** Plug the phone in, unlock it, and tap **Trust** when asked.
+2. **Turn on Developer Mode.** Settings → Privacy & Security → Developer Mode → On.
+   The phone restarts; confirm when it asks.
+   Don't see Developer Mode there? iOS hides it until a developer tool asks for it —
+   see [Troubleshooting](#troubleshooting).
 
-**Windows** — the classic tunnel builds a TUN interface, so it needs Administrator.
+---
 
-```
-run.bat
-```
-# OR 
+## Getting started
 
-Either platform, from an already-privileged shell:
-
-```
-.venv/bin/python main.py          # macOS / Linux
-.venv\Scripts\python.exe main.py  # Windows
-```
-
-## At the prompt
-
-```
-loc> 40.690008, -74.045843          set location (Statue of Liberty)
-loc> 35.6762 139.6503               commas optional
-loc> 40.690008, -74.045843 as home  set it and bookmark it
-loc> home                           go to a bookmark (exact, case-sensitive)
-loc> save home                      bookmark where you are now
-loc> list                           show bookmarks; 'delete <name>', 'back'
-loc> noise                          drift status: radius, ticks, last offset
-loc> noise off                      stop drifting, snap to the exact coordinate
-loc> noise on                       resume
-loc> noise 10                       change radius to +/-10 m, live
-loc> clear                          restore real GPS, stay connected
-loc> q                              clear, close tunnel, exit
+```bash
+git clone <this repository>
+cd locspoof
 ```
 
-Quitting always restores your real GPS.
+Then start it:
 
-Bookmarks are optional — plain coordinates teleport in a single input. They live
-in a SQLite file at `data/locations.sqlite3`, which is gitignored. Names are
-exact and case-sensitive: `Home` and `home` are different bookmarks. Names that
-collide with a command (`clear`, `noise`, `list`, `save`, `q`, …) or that parse
-as coordinates are refused, because the prompt would never reach them.
-
-## GPS noise
-
-A real receiver never reports a perfectly still point. After a successful spoof,
-locspoof rewrites the location once a second with a small random offset so the
-blue dot behaves like GPS instead of a pin.
-
-Jitter is always computed from the **anchor** — the coordinate you typed — never
-from the previous jittered point. That distinction is the whole design: feeding
-output back in would be a random walk that wanders off (~160 m after 10k ticks
-in testing).
-
-Each axis (north, east) sums three components, all scaled by `radius_m`:
-
-| component | role |
+| macOS | Windows |
 | --- | --- |
-| first-order Gauss-Markov | slow wandering bias, 30 s correlation time |
-| white Gaussian | per-sample scatter |
-| reflected random walk | bounded low-frequency drift |
+| `./run.sh` | double-click `run.bat` |
 
-The Gauss-Markov term uses the exact discrete transition, so behavior does not
-depend on sample rate — `dt` is measured from `perf_counter`, not assumed.
-A plain random walk is unbounded, so that component reflects at a symmetric
-limit; the sum is then clipped to `+/-radius_m` per axis. Offsets in meters
-convert to degrees with a `cos(latitude)` correction for longitude.
+The first launch sets itself up, which takes a minute. After that it starts in a
+few seconds. Windows will ask for administrator permission each time — that's
+required to talk to the iPhone.
 
-Tuning lives in `NoiseParameters` as fractions of the radius. These are
-deliberate choices, not a calibrated iPhone receiver model.
+Your browser opens to **http://127.0.0.1:8765**. **Keep the terminal window open**
+while you use it — closing it disconnects the phone.
 
-## Flags
+The map needs an internet connection to load.
 
-| flag | meaning |
+---
+
+## Using it
+
+**Set a location** — click anywhere on the map, then **Move here**. Or type a
+latitude and longitude and click **Set location**; you can paste both at once, like
+`40.690008, -74.045843`, into either box.
+
+On the map, the **red pin** is where you asked to be and the **blue dot** is what
+the phone is actually told — they differ slightly while drift is on.
+
+**Save a bookmark** — type a name in **Bookmark as** before setting a location, or
+click **Save current** to bookmark where you already are. Bookmarks appear at the
+bottom; click **Go** to jump back to one.
+
+**GPS drift** — a real phone's location is never perfectly still. With drift on,
+your location wobbles a few meters, like real GPS. Turn it off for an exact,
+fixed point. **Radius** sets how far it wanders.
+
+**Clear** — hands your phone back its real GPS, and stays connected.
+
+**Quit** — restores your real GPS and disconnects. Pressing Ctrl+C in the terminal
+does the same.
+
+**Closing the page also quits.** If no locspoof page is open for 30 seconds,
+locspoof restores your real GPS and shuts down, so a forgotten session never leaves
+your phone stuck somewhere. Reloading the page, or reopening it within 30 seconds,
+keeps your session. Your real location always comes back when locspoof closes.
+
+---
+
+## Debug mode
+
+If locspoof can't reach an iPhone, it still opens — in **debug mode**. A yellow
+banner at the top says so and tells you why:
+
+- **No Phone Connected** — nothing is plugged in, or the phone isn't unlocked and trusted.
+- **Phone found but couldn't connect** — the banner shows the reason, most often
+  Developer Mode being off.
+
+Everything on the page works in debug mode, but nothing moves a real phone. Fix the
+problem the banner describes, then restart locspoof.
+
+To try the app with a phone plugged in but without moving it, start with `--debug`.
+
+---
+
+## Options
+
+Add these after `./run.sh` or `run.bat`:
+
+| option | what it does |
 | --- | --- |
-| `--debug` | echo raw tunnel output and internal trace to stderr |
-| `--noise M` | drift radius in meters (default 3) |
-| `--noise-interval S` | seconds between samples (default 1) |
-| `--no-noise` | disable drift entirely — a perfectly static point |
-| `--sudo-tunnel` | macOS only: force the classic root tunnel (run under `sudo`) |
-| `-h`, `--help` | print usage and exit without touching the device |
+| `--port 8766` | use a different port, if 8765 is taken |
+| `--no-browser` | don't open the browser automatically |
+| `--debug` | start in debug mode even with a phone connected |
+| `--verbose` | print connection details, for troubleshooting |
+| `--help` | list these options |
 
-Unknown options are refused rather than ignored, so a typo like `--nosie 5`
-stops instead of silently running with the default radius.
+---
 
-## Layout
+## Troubleshooting
 
-```
-main.py                    entry point: flags, wiring, exit codes
-cli/prompt.py              the REPL — presentation only
-core/models.py             Coordinate, Device, TunnelInfo
-core/tunnel_manager.py     start-tunnel subprocess lifecycle
-core/device_manager.py     RSD + DVT session
-core/location_service.py   set/clear, noise ticker, routes (later)
-core/location_store.py     SQLite bookmarks
-core/noise.py              the GPS error model
-tests/                     unittest suite; runs without a device
-data/                      locations.sqlite3 (gitignored)
-```
+**"Port 8765 is already in use"** — locspoof is probably already running in another
+window. Close it, or start with `--port 8766`.
 
-Nothing in `core/` prints, and no pymobiledevice3 object crosses out of it —
-`Device`, `Coordinate` and `SavedLocation` are the boundary. The pymobiledevice3
-import is deferred behind `TYPE_CHECKING`, so the whole suite runs on a machine
-with no iPhone and no tunnel:
+**"Python 3.10 or newer is required"** — install it from python.org. On Windows,
+reinstall and tick "Add python.exe to PATH".
+
+**Stuck on "No Phone Connected" with the phone plugged in** — unlock the phone,
+check for a Trust prompt, and try another cable or port. Charge-only cables don't
+carry data. On Windows, make sure iTunes or Apple Devices is installed.
+
+**Developer Mode is missing from Settings** — run locspoof once so it sets itself up,
+then, with the phone plugged in and unlocked, run this from the locspoof folder:
 
 ```
-python -m pytest tests -q
+.venv/bin/python -m pymobiledevice3 amfi reveal-developer-mode            # macOS
+.venv\Scripts\python.exe -m pymobiledevice3 amfi reveal-developer-mode   # Windows
 ```
+
+The option now appears under Settings → Privacy & Security.
+
+**"Phone found but couldn't connect" on the first try** — the first connection
+downloads a component from Apple, so check you're online. After that it's saved.
+
+**macOS: "Phone found but couldn't connect", and Developer Mode is on** — try
+`sudo ./run.sh --sudo-tunnel`, which uses a different connection method.
+
+**Anything else** — run with `--verbose` and look at the terminal output.

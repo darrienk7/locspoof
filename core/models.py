@@ -1,7 +1,7 @@
 """Plain data the UI is allowed to see.
 
 Nothing in here imports pymobiledevice3. These types are the boundary: they
-cross from core/ to the CLI (and later the GUI), while raw pymobiledevice3
+cross from core/ to the web app, while raw pymobiledevice3
 objects stay inside core/.
 """
 
@@ -54,4 +54,3 @@ class Device:
     udid: str
     product_type: str
     ios_version: str
-    connected: bool = True

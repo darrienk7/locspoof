@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
+import threading
 
 from .models import Coordinate, SavedLocation
 
@@ -17,14 +18,19 @@ class LocationExistsError(ValueError):
 class LocationStore:
     """Exact, case-sensitive names; strip only leading and trailing whitespace.
 
-    This small repository stays on the calling thread. The CLI reads input in a
-    worker, but all database operations run back on the event-loop thread.
+    Both front-ends call this from the event-loop thread, but nothing enforces
+    that: FastAPI runs a non-async route handler in a worker thread, and
+    TestClient always does. Rather than rely on the convention holding, the
+    connection allows cross-thread use and every statement is serialized by a
+    lock - which also protects the implicit transaction `with self._connection`
+    opens.
     """
 
     def __init__(self, path: str | Path = DEFAULT_DATABASE_PATH) -> None:
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(str(path))
+        self._lock = threading.Lock()
+        self._connection = sqlite3.connect(str(path), check_same_thread=False)
         try:
             with self._connection:
                 self._connection.execute("""
@@ -48,7 +54,7 @@ class LocationStore:
     def save(self, name: str, coordinate: Coordinate) -> SavedLocation:
         name = self._name(name)
         try:
-            with self._connection:
+            with self._lock, self._connection:
                 self._connection.execute(
                     "INSERT INTO saved_locations (name, latitude, longitude) VALUES (?, ?, ?)",
                     (name, coordinate.latitude, coordinate.longitude),
@@ -60,27 +66,30 @@ class LocationStore:
         return SavedLocation(name, coordinate)
 
     def get(self, name: str) -> SavedLocation | None:
-        row = self._connection.execute(
-            "SELECT name, latitude, longitude FROM saved_locations WHERE name = ?",
-            (name.strip(),),
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT name, latitude, longitude FROM saved_locations WHERE name = ?",
+                (name.strip(),),
+            ).fetchone()
         return SavedLocation(row[0], Coordinate(row[1], row[2])) if row else None
 
     def list_all(self) -> list[SavedLocation]:
-        rows = self._connection.execute(
-            "SELECT name, latitude, longitude FROM saved_locations ORDER BY name COLLATE BINARY"
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT name, latitude, longitude FROM saved_locations ORDER BY name COLLATE BINARY"
+            ).fetchall()
         return [SavedLocation(name, Coordinate(lat, lon)) for name, lat, lon in rows]
 
     def delete(self, name: str) -> bool:
-        with self._connection:
+        with self._lock, self._connection:
             cursor = self._connection.execute(
                 "DELETE FROM saved_locations WHERE name = ?", (name.strip(),)
             )
         return cursor.rowcount != 0
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def __enter__(self) -> LocationStore:
         return self

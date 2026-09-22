@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>locspoof</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 40'%3E%3Cpath d='M14 0C6.3 0 0 6.2 0 13.9 0 24.3 14 40 14 40s14-15.7 14-26.1C28 6.2 21.7 0 14 0z' fill='%23e5484d'/%3E%3Ccircle cx='14' cy='14' r='5.5' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span id="dot" class="dot"></span>
+    <strong>locspoof</strong>
+  </div>
+  <div class="device" id="device">connecting…</div>
+</header>
+
+<div id="debugBanner" class="debug-banner" role="alert" hidden>
+  <div class="debug-head">
+    <span class="debug-tag">DEBUG MODE</span>
+    <strong id="debugTitle">No Phone Connected</strong>
+  </div>
+  <p id="debugDetail"></p>
+  <p class="debug-note">Everything works as normal, but nothing here moves a real phone.</p>
+</div>
+
+<div class="app">
+
+  <div id="map" class="map" aria-label="Map. Click anywhere to move there."></div>
+
+  <aside class="panel">
+
+    <section class="card">
+      <h2>Set location</h2>
+      <div class="row">
+        <label class="field">
+          <span>Latitude</span>
+          <input id="lat" type="text" inputmode="decimal" placeholder="40.690008" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>Longitude</span>
+          <input id="lon" type="text" inputmode="decimal" placeholder="-74.045843" autocomplete="off">
+        </label>
+      </div>
+      <div class="row">
+        <label class="field grow">
+          <span>Bookmark as <em>(optional)</em></span>
+          <input id="name" type="text" placeholder="home" autocomplete="off">
+        </label>
+        <button id="set" class="primary">Set location</button>
+      </div>
+      <p class="hint">Or click anywhere on the map. You can also paste
+        <code>40.690008, -74.045843</code> into either box.</p>
+    </section>
+
+    <section class="card">
+      <h2>Now reporting</h2>
+      <dl class="stats">
+        <div class="wide"><dt>Anchor <em>(where you asked to be)</em></dt><dd id="anchor">—</dd></div>
+        <div class="wide"><dt>Reported <em>(what the phone sees)</em></dt><dd id="current">—</dd></div>
+        <div><dt>Offset</dt><dd id="offset">—</dd></div>
+        <div><dt>Ticks</dt><dd id="ticks">—</dd></div>
+      </dl>
+      <div class="row end">
+        <input id="saveName" type="text" placeholder="bookmark this spot" autocomplete="off">
+        <button id="save">Save current</button>
+        <button id="clear" class="danger">Clear · restore GPS</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>
+        GPS drift
+        <label class="switch">
+          <input id="noiseOn" type="checkbox">
+          <span></span>
+        </label>
+      </h2>
+      <div class="row">
+        <label class="field">
+          <span>Radius (m)</span>
+          <input id="radius" type="number" min="0.1" step="0.1" value="3">
+        </label>
+        <label class="field">
+          <span>Interval (s)</span>
+          <input id="interval" type="number" min="0.1" step="0.1" value="1">
+        </label>
+        <button id="applyNoise">Apply</button>
+      </div>
+      <p class="hint" id="noiseState">—</p>
+    </section>
+
+    <section class="card">
+      <h2>Bookmarks</h2>
+      <ul id="bookmarks" class="list"><li class="empty">none yet</li></ul>
+    </section>
+
+    <div class="footer">
+      <button id="quit" class="danger">Quit</button>
+    </div>
+
+  </aside>
+</div>
+
+<div id="closed" class="closed" hidden>
+  <div class="closed-card">
+    <strong id="closedTitle">locspoof has closed</strong>
+    <p id="closedDetail">Your real GPS has been restored. You can close this tab.</p>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/vendor/leaflet/leaflet.js"></script>
+<script src="/static/map.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

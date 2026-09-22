@@ -77,14 +77,6 @@ class TunnelManager:
         self._info: Optional[TunnelInfo] = None
 
     @property
-    def use_native(self) -> bool:
-        return self._use_native
-
-    @property
-    def is_running(self) -> bool:
-        return self._proc is not None and self._proc.returncode is None
-
-    @property
     def info(self) -> Optional[TunnelInfo]:
         return self._info
 

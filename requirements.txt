@@ -1,0 +1,8 @@
+# Talks to the iPhone. Pinned to the 11.x line this app is built against.
+pymobiledevice3>=11.12,<12
+
+# The web app. pymobiledevice3 already pulls these in, but locspoof imports
+# them directly, so they are declared here rather than inherited by accident.
+fastapi
+uvicorn
+wsproto

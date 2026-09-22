@@ -1,20 +1,45 @@
 #!/usr/bin/env bash
-# locspoof launcher (macOS / Linux)
+# locspoof launcher for macOS and Linux.
 #
-# On macOS no sudo is needed: pymobiledevice3 uses Apple's native tunnel.
-# On Linux the classic tunnel needs root, so main.py will ask you to re-run
-# under sudo.
+# First run creates a private Python environment in .venv and installs what
+# locspoof needs. After that it just starts the app. If requirements.txt
+# changes (for example after a `git pull`), it reinstalls automatically.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PY=".venv/bin/python"
+VENV_PY=".venv/bin/python"
+STAMP=".venv/requirements.installed"
 
-if [ ! -x "$PY" ]; then
-    echo "Could not find $PY"
-    echo "Create the venv first:"
-    echo "    python3 -m venv .venv && .venv/bin/pip install pymobiledevice3"
-    exit 1
+find_python() {
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 &&
+           "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ ! -x "$VENV_PY" ]; then
+    echo "First run - setting up locspoof. This takes a minute, once."
+    if ! PYTHON="$(find_python)"; then
+        echo
+        echo "Python 3.10 or newer is required and wasn't found."
+        echo "Install it from https://www.python.org/downloads/ and run this again."
+        exit 1
+    fi
+    "$PYTHON" -m venv .venv
 fi
 
-exec "$PY" main.py "$@"
+if ! cmp -s requirements.txt "$STAMP" 2>/dev/null; then
+    echo "Installing dependencies..."
+    "$VENV_PY" -m pip install --quiet --upgrade pip
+    "$VENV_PY" -m pip install --quiet -r requirements.txt
+    cp requirements.txt "$STAMP"
+    echo "Done."
+    echo
+fi
+
+exec "$VENV_PY" main.py "$@"

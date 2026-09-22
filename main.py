@@ -1,192 +1,217 @@
 #!/usr/bin/env python3
-"""locspoof - entry point. Parses flags, wires the services, owns exit codes."""
+"""locspoof - connects to your iPhone and opens the web app.
+
+With no usable iPhone it still opens, in DEBUG MODE: every control works, but
+writes go to an in-process stand-in instead of a phone, and the page says so.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
+from typing import Optional
 
-from cli import prompt
 from core.device_manager import DeviceManager
 from core.location_service import LocationService
 from core.location_store import LocationStore
-from core.noise import DEFAULT_INTERVAL_S, DEFAULT_RADIUS_M, GpsNoise
-from core.tunnel_manager import (
-    DEFAULT_TIMEOUT,
-    IS_MAC,
-    IS_WINDOWS,
-    PrivilegeError,
-    TunnelError,
-    TunnelManager,
-    is_admin,
-)
+from core.tunnel_manager import IS_MAC, IS_WINDOWS, TunnelManager, is_admin
+from gui import server
 
-USAGE = """locspoof - set your iPhone's GPS location from the terminal
+USAGE = f"""locspoof - set your iPhone's GPS location from a web page
 
-usage: main.py [options]
+usage: run.sh [options]      (run.bat on Windows)
 
 options:
-  -h, --help            show this message and exit
-  --debug               echo tunnel output and internal trace to stderr
-  --noise M             drift radius in meters (default %(radius)g)
-  --noise-interval S    seconds between drift samples (default %(interval)g)
-  --no-noise            disable drift entirely - a perfectly static point
-  --sudo-tunnel         macOS only: force the classic root tunnel
+  -h, --help       show this message and exit
+  --port N         serve the page on port N (default {server.DEFAULT_PORT})
+  --no-browser     don't open the page automatically
+  --debug          start in DEBUG MODE even if an iPhone is connected
+  --verbose        print connection details and every location write
+  --sudo-tunnel    macOS only: use the root tunnel if the normal one fails
+"""
 
-at the prompt:
-  40.69, -74.04             set location
-  40.69, -74.04 as home     set location and bookmark it
-  home                      go to a saved bookmark
-  save home                 bookmark where you are now
-  list                      show, and delete, saved bookmarks
-  noise [on|off|<meters>]   drift status or control
-  clear                     restore real GPS
-  q                         quit
-""" % {"radius": DEFAULT_RADIUS_M, "interval": DEFAULT_INTERVAL_S}
+BOOL_FLAGS = frozenset({"-h", "--help", "--no-browser", "--debug", "--verbose", "--sudo-tunnel"})
+VALUE_FLAGS = frozenset({"--port"})
 
-# Flags taking no value, and flags consuming the argument after them.
-BOOL_FLAGS = frozenset({"--debug", "--sudo-tunnel", "--no-noise", "--help", "-h"})
-VALUE_FLAGS = frozenset({"--noise", "--noise-interval"})
+ARGS = sys.argv[1:]
+HELP = "-h" in ARGS or "--help" in ARGS
+FORCE_DEBUG = "--debug" in ARGS
+VERBOSE = "--verbose" in ARGS
+NO_BROWSER = "--no-browser" in ARGS
+FORCE_SUDO_TUNNEL = "--sudo-tunnel" in ARGS
 
-HELP = "--help" in sys.argv or "-h" in sys.argv
-DEBUG = "--debug" in sys.argv
-FORCE_SUDO_TUNNEL = "--sudo-tunnel" in sys.argv
-NO_NOISE = "--no-noise" in sys.argv
-
-# macOS rides Apple's existing tunnel (no root). Everywhere else we build one.
+# macOS borrows Apple's existing tunnel (no admin). Elsewhere we build one.
 USE_NATIVE_TUNNEL = IS_MAC and not FORCE_SUDO_TUNNEL
 
+# The headline shown in the page's DEBUG MODE banner.
+NO_PHONE = "No Phone Connected"
+PHONE_FAILED = "Phone found but couldn't connect"
+FORCED = "Started with --debug"
 
-def log(msg: str) -> None:
-    if DEBUG:
-        print(f"[debug] {msg}", file=sys.stderr)
+
+# pymobiledevice3 colours its log output; strip that before showing it.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def unknown_flags(argv: list[str]) -> list[str]:
-    """Anything that isn't a known flag or the value of one.
+def failure_summary(exc: Exception) -> str:
+    """The most useful single line explaining a failed connection.
 
-    A silently-ignored typo like `--nosie 5` would run with the default radius
-    and never say so, which is worse than refusing to start.
+    The tunnel reports failures on stderr, and the last line there is usually
+    the actual cause ("...Developer Mode is not enabled"). That beats the
+    generic "exited without printing an address" the exception itself carries.
     """
-    unknown: list[str] = []
+    details = getattr(exc, "details", "") or ""
+    lines = [ANSI_ESCAPE.sub("", line).strip() for line in details.splitlines()]
+    lines = [line for line in lines if line]
+    if lines:
+        return lines[-1][:200]
+    return str(exc) or type(exc).__name__
+
+
+def log(message: str) -> None:
+    if VERBOSE:
+        print(f"  [verbose] {message}", file=sys.stderr)
+
+
+def parse_args() -> Optional[int]:
+    """Return the port, or None if the arguments are unusable (already reported)."""
     index = 0
-    while index < len(argv):
-        arg = argv[index]
+    while index < len(ARGS):
+        arg = ARGS[index]
         if arg in BOOL_FLAGS:
             index += 1
         elif arg in VALUE_FLAGS:
             index += 2
         else:
-            unknown.append(arg)
-            index += 1
-    return unknown
+            print(f"! unknown option: {arg}  (see --help)")
+            return None
 
-
-def flag_value(name: str, default: float) -> float:
-    """Read `--name X`, falling back to `default`."""
+    if "--port" not in ARGS:
+        return server.DEFAULT_PORT
+    position = ARGS.index("--port") + 1
     try:
-        index = sys.argv.index(name)
-    except ValueError:
-        return default
-    if index + 1 >= len(sys.argv):
-        print(f"! {name} needs a value, using {default}")
-        return default
+        port = int(ARGS[position])
+    except (IndexError, ValueError):
+        print("! --port needs a number, e.g. --port 8766")
+        return None
+    if not 1 <= port <= 65535:
+        print("! --port must be between 1 and 65535")
+        return None
+    return port
+
+
+async def iphone_plugged_in() -> bool:
+    """Ask the OS's USB device service whether an iPhone is attached.
+
+    Takes about a tenth of a second, so "no phone" is detected immediately
+    instead of waiting out the tunnel's timeout. If the service itself isn't
+    running (on Windows: Apple Mobile Device Support missing), no phone can
+    connect either way.
+    """
+    from pymobiledevice3.usbmux import list_devices
+
     try:
-        return float(sys.argv[index + 1])
-    except ValueError:
-        print(f"! {name} needs a number, using {default}")
-        return default
+        devices = await list_devices()
+    except Exception as exc:
+        log(f"usbmux unavailable: {exc}")
+        return False
+    return any(device.is_usb for device in devices)
 
 
-def report_tunnel_failure(exc: Exception) -> None:
-    details = getattr(exc, "details", "")
-    if details:
-        print("\n--- start-tunnel output ---", file=sys.stderr)
-        print(details, file=sys.stderr)
-        print("---------------------------\n", file=sys.stderr)
-    print(f"Could not open the tunnel: {exc}")
-    print("Is the iPhone plugged in, unlocked, trusted, and in Developer Mode?")
-    if USE_NATIVE_TUNNEL:
-        print("If the native tunnel keeps failing, try:")
-        print("  sudo .venv/bin/python main.py --sudo-tunnel")
+async def connect(devices: DeviceManager, location: LocationService) -> Optional[tuple[str, str]]:
+    """Bring up the real session.
+
+    Returns None on success, or (headline, detail) explaining why the app is
+    falling back to DEBUG MODE.
+    """
+    if not await iphone_plugged_in():
+        return (
+            NO_PHONE,
+            "Plug in your iPhone with a cable, unlock it, tap Trust if asked, "
+            "then restart locspoof.",
+        )
+
+    if not USE_NATIVE_TUNNEL and not is_admin():
+        where = "run.bat" if IS_WINDOWS else "sudo ./run.sh"
+        return (
+            PHONE_FAILED,
+            f"Connecting to an iPhone here needs administrator rights. Start locspoof with {where}.",
+        )
+
+    print("  iPhone found - connecting (a few seconds)...")
+    try:
+        await devices.open_tunnel()
+        device = await devices.connect()
+        await location.attach()
+    except Exception as exc:
+        # Tear down whatever half-opened before falling back.
+        await devices.disconnect()
+        log(f"connection failed: {exc}\n{getattr(exc, 'details', '')}")
+        return (
+            PHONE_FAILED,
+            f"{failure_summary(exc)} — check the iPhone is unlocked and trusted, "
+            "Developer Mode is on (Settings › Privacy & Security), and this "
+            "computer is online the first time you connect.",
+        )
+
+    print(f"  Connected to {device.product_type} (iOS {device.ios_version})")
+    return None
 
 
 async def main() -> int:
-    # Help and flag validation come first: neither should touch the phone.
     if HELP:
         print(USAGE, end="")
         return 0
 
-    bad = unknown_flags(sys.argv[1:])
-    if bad:
-        print(f"! unknown option{'s' if len(bad) > 1 else ''}: {' '.join(bad)}")
-        print("  run with --help to see the available options")
+    port = parse_args()
+    if port is None:
         return 2
 
-    if not USE_NATIVE_TUNNEL and not is_admin():
-        print("The classic tunnel creates a network interface, so it needs elevation.")
-        print()
-        if IS_WINDOWS:
-            print("Run run.bat, or reopen your terminal as Administrator.")
-        else:
-            print("Re-run with sudo, e.g.:  sudo .venv/bin/python main.py")
+    # Before touching the phone: a second copy of locspoof would otherwise
+    # open a second tunnel to it and only then discover it can't serve.
+    if not server.port_is_free(port):
+        print(f"! port {port} is already in use - is locspoof already running?")
+        print(f"  Close it, or start this one with --port {port + 1}")
         return 1
 
+    tunnel = TunnelManager(use_native=USE_NATIVE_TUNNEL, debug=log)
+    devices = DeviceManager(tunnel, debug=log, status=lambda message: print(f"  {message}"))
+    location = LocationService(devices, debug=log)
+
+    print("locspoof")
+    if FORCE_DEBUG:
+        debug_reason = (FORCED, "Nothing you do here will move a real phone.")
+    else:
+        debug_reason = await connect(devices, location)
+
+    if debug_reason is not None:
+        location.attach_simulated()
+        print(f"  DEBUG MODE - {debug_reason[0]}")
+        print(f"  {debug_reason[1]}")
+
+    started = False
     try:
-        noise = GpsNoise(
-            radius_m=flag_value("--noise", DEFAULT_RADIUS_M),
-            interval_s=flag_value("--noise-interval", DEFAULT_INTERVAL_S),
-        )
-    except ValueError as exc:
-        print(f"! {exc}")
-        return 2
-
-    tunnel = TunnelManager(use_native=USE_NATIVE_TUNNEL, timeout=DEFAULT_TIMEOUT, debug=log)
-    devices = DeviceManager(tunnel, debug=log)
-    location = LocationService(
-        devices, noise=noise, noise_enabled=not NO_NOISE, debug=log
-    )
-
-    kind = "native (no root)" if USE_NATIVE_TUNNEL else "classic"
-    print(f"Opening {kind} tunnel (this takes a few seconds)...")
-    try:
-        info = await devices.open_tunnel()
-    except (TunnelError, PrivilegeError) as exc:
-        report_tunnel_failure(exc)
-        return 1
-    except Exception as exc:
-        report_tunnel_failure(exc)
-        return 1
-
-    print(f"Tunnel up  ->  RSD {info.address} port {info.port}")
-
-    exit_code = 0
-    try:
-        device = await devices.connect()
-        print(f"Connected to {device.product_type} (iOS {device.ios_version})")
-
-        await location.attach()
-        try:
-            with LocationStore() as saved_locations:
-                await prompt.run(location, saved_locations)
-        finally:
-            print("Restoring real GPS...")
-            try:
-                await location.clear_location()
-            except Exception as exc:
-                print(f"  ! clear failed: {exc}")
-            await location.detach()
-    except Exception as exc:
-        print(f"Error: {exc}")
-        if DEBUG:
-            import traceback
-            traceback.print_exc()
-        exit_code = 1
+        with LocationStore() as saved:
+            started = await server.serve(
+                devices,
+                location,
+                saved,
+                port=port,
+                open_browser=not NO_BROWSER,
+                debug_reason=debug_reason,
+            )
     finally:
+        if debug_reason is None:
+            print("  Restoring your real GPS...")
+        try:
+            await location.clear_location()
+        except Exception as exc:
+            print(f"  ! could not restore GPS: {exc}")
+        await location.detach()
         await devices.disconnect()
-        print("Tunnel closed.")
-
-    return exit_code
+        print("  Closed.")
+    return 0 if started else 1
 
 
 if __name__ == "__main__":

@@ -19,6 +19,10 @@ from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
 from .models import Device, TunnelInfo
 from .tunnel_manager import TunnelManager
 
+# The DVT service location simulation runs on. iOS only offers it once Apple's
+# Developer Disk Image is mounted - and unmounts that image on every reboot.
+DVT_SERVICE = DvtProvider.RSD_SERVICE_NAME
+
 
 def _noop(_: str) -> None:
     pass
@@ -28,17 +32,19 @@ class DeviceManager:
     """Brings up a tunnel, then an RSD + DVT session on top of it.
 
     Connecting is two stages on purpose. Callers want to report "tunnel up"
-    before the (slower) device handshake starts — the CLI prints between them
-    today, and a GUI will want the same progress split.
+    before the (slower) device handshake starts.
     """
 
     def __init__(
         self,
         tunnel: TunnelManager,
         debug: Optional[Callable[[str], None]] = None,
+        status: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._tunnel = tunnel
         self._debug = debug or _noop
+        # User-facing progress, for the slow first-time step below.
+        self._status = status or _noop
         self._stack: Optional[AsyncExitStack] = None
         self._dvt: Optional[DvtProvider] = None
         self._device: Optional[Device] = None
@@ -50,10 +56,6 @@ class DeviceManager:
     @property
     def tunnel_info(self) -> Optional[TunnelInfo]:
         return self._tunnel.info
-
-    @property
-    def is_connected(self) -> bool:
-        return self._stack is not None
 
     @property
     def dvt(self) -> DvtProvider:
@@ -76,11 +78,17 @@ class DeviceManager:
         if info is None:
             raise RuntimeError("no tunnel - call open_tunnel() first")
 
+        address = (info.address, info.port)
         stack = AsyncExitStack()
         try:
-            rsd = await stack.enter_async_context(
-                RemoteServiceDiscoveryService((info.address, info.port))
-            )
+            rsd = await stack.enter_async_context(RemoteServiceDiscoveryService(address))
+            if not self._offers(rsd, DVT_SERVICE):
+                await self._mount_developer_image(rsd)
+                # The service list is a snapshot taken at the handshake, so the
+                # newly available service only shows up on a fresh connection.
+                await stack.aclose()
+                stack = AsyncExitStack()
+                rsd = await stack.enter_async_context(RemoteServiceDiscoveryService(address))
             dvt = await stack.enter_async_context(DvtProvider(rsd))
         except BaseException:
             await stack.aclose()
@@ -92,10 +100,35 @@ class DeviceManager:
             udid=rsd.udid,
             product_type=rsd.product_type,
             ios_version=rsd.product_version,
-            connected=True,
         )
         self._debug(f"connected to {self._device.udid} ({self._device.ios_version})")
         return self._device
+
+    @staticmethod
+    def _offers(rsd: RemoteServiceDiscoveryService, service: str) -> bool:
+        from pymobiledevice3.exceptions import InvalidServiceError
+
+        try:
+            rsd.get_service_port(service)
+        except InvalidServiceError:
+            return False
+        return True
+
+    async def _mount_developer_image(self, rsd: RemoteServiceDiscoveryService) -> None:
+        """Mount Apple's Developer Disk Image so developer services appear.
+
+        The first time on a computer this downloads the image (cached after,
+        under ~/.pymobiledevice3) and has Apple sign it for this phone, so it
+        needs an internet connection and can take a minute.
+        """
+        from pymobiledevice3.exceptions import AlreadyMountedError
+        from pymobiledevice3.services.mobile_image_mounter import auto_mount
+
+        self._status("Preparing the iPhone for location control (first time can take a minute)...")
+        try:
+            await auto_mount(rsd)
+        except AlreadyMountedError:
+            self._debug("developer disk image already mounted")
 
     async def disconnect(self) -> None:
         """Close the DVT connection, then RSD, then the tunnel.
