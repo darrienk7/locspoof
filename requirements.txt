@@ -6,3 +6,4 @@ pymobiledevice3>=11.12,<12
 fastapi
 uvicorn
 wsproto
+

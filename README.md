@@ -139,3 +139,15 @@ downloads a component from Apple, so check you're online. After that it's saved.
 `sudo ./run.sh --sudo-tunnel`, which uses a different connection method.
 
 **Anything else** — run with `--verbose` and look at the terminal output.
+
+---
+
+## License
+
+locspoof is free software, released under the
+[GNU General Public License v3.0](LICENSE).
+
+It's built on [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), which is
+also GPL-3.0. The map uses [Leaflet](https://leafletjs.com) (BSD-2-Clause, bundled in
+`web/vendor/leaflet`) with map data © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+contributors.
